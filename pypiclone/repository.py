@@ -69,6 +69,8 @@ def write_file(source, destination):
             fd.write(source)
 
 
+
+
 class PypiRepository(object):
 
     def __init__(self, base_path):
@@ -77,49 +79,43 @@ class PypiRepository(object):
     def build_resource(self, *args):
         raise NotImplementedError()
 
-    def load_resource(self, uri):
+    def load_resource(self, resource_path):
         raise NotImplementedError()
 
-    def save_resource(self, uri):
+    def save_resource(self, source, destination):
         raise NotImplementedError()
+
+    #
+    # SHOULD NOT BE OVERRIDDEN
+    #
+    def archive_path(self, uri):
+        return self.build_resource(uri)
 
     def signature_path(self, package):
-        return self.build_resource(self.base_path, "serversig", package)
+        return self.build_resource("serversig", package)
 
     def simple_path(self, package):
+        return self.build_resource(
+            self.base_path, "simple", package, "index.html")
 
+    def read_archive(self, source):
+        return self.load_resource(source)
 
+    def read_signature(self, package):
+        return self.load_resource(self.signature_path(package))
+    
+    def read_simple_path(self, package):
+        return self.load_resource(self.simple_page_path(package))
 
-
-    def join_base_path(self, *args):
-        return self.join(self.path, *args)
-
-    def archive_path(self, uri):
-        return self.join_base_path(uri)
-
-    def signature_path(self, package):
-        return self.join(self.path, "serversig", package)
-
-    def simple_page_path(self, package):
-        return os.path.join(self.path, "simple", package, "index.html")
-
-    def load_archive(self, uri):
-        raise NotImplementedError()
-
-    def load_simple_page(self, package):
-        raise NotImplementedError()
-
-    def load_signature(self, package):
-        raise NotImplementedError()
-
-    def write_archive(self, uri, source):
-        raise NotImplementedError()
-
-    def write_simple_page(self, package, source):
-        raise NotImplementedError()
+    def write_archive(self, source, destination):
+        self.save_resource(source, destination)
 
     def write_signature(self, package, source):
-        raise NotImplementedError()
+        self.save_resource(source, self.signature_path(package))
+
+    def write_simple_page(self, package, source):
+        self.save_resource(source, self.simple_page_path(package))
+
 
 
 class LocalPypiRepository(PypiRepository):
