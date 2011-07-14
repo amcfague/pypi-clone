@@ -1,169 +1,87 @@
+import logging
 import os
-import urlparse
 import xmlrpclib
-from httplib import HTTPConnection
-import time
-import shutil
+from xml.etree.ElementTree import ElementTree
 
-import lockfile
+from pypiclone.repository import LocalPypiRepository, RemotePypiRepository
 
 
-# XXX Replace this with the actual version!
-USER_AGENT = "pypiclone/0.1"
-DEFAULT_XMLRPC_HOST = "pypi.python.org"
-DEFAULT_PACKAGE_HOST = "b.pypi.python.org"
+log = logging.getLogger(__name__)
 
+class MirrorClient(object):
 
-class RemoteException(Exception): pass
-class LocalException(Exception): pass
-
-class MirrorNotFound(RemoteException): pass
-
-class PypiSource(object):
-    """
-    Wraps calls to PyPi, usually in the form of XMLRPC requests.
-
-    ``local_pypi_destination``
-        The location to store the mirrored PyPi installation.  This will raise
-        an IOError if the location cannot be written to.
-    ``host``
-        PyPi host to use; this should be the hostname only--and the host should
-        implement the /simple URL.  Leave default to use one of the default
-        PyPi mirrors.
-
-        You can also use the bundled `netselect-pypi` to find the fastest PyPi
-        mirror; however, it is not recommended that you run this often--once
-        you have a close server, please continue to use it.
-    """
-
-    def __init__(self, local_pypi_destination, mirror=DEFAULT_PACKAGE_HOST):
-        # Use the DEFAULT_PYPI_HOSTNAME if no host is passed.
-        self.mirror_host = mirror
-
-        # XXX Assert that this exists and is writable!
-        self.local_pypi_destination = local_pypi_destination
-        self.last_synchronized_filename = os.path.join(
-            local_pypi_destination, "last-synchronized")
-
-        # Establish a shared connection the XMLRPC server on PyPi.  This must
-        # *always* use the XMLRPC server hosted on `pypi.python.org`.
-        self._xmlrpc_conn = xmlrpclib.ServerProxy(
-            "http://%s/pypi" % DEFAULT_XMLRPC_HOST)
-
-        # According to :pep:`381`, this client should to authorize itself via
-        # the User Agent string.
-        self._xmlrpc_conn.useragent = USER_AGENT
-
-        # Prepare the lockfile; we can't have multiple processes on the same
-        # location calling this script.
-        lockfile_location = os.path.join(local_pypi_destination, ".pypi.lock")
-        self.__lockfile = lockfile.FileLock(lockfile_location)
-
-        self._create_directory_structure()
-
-    def _create_directory_structure(self):
-        try:
-            os.makedirs(self.local_pypi_destination)
-        except:
-            pass
-
-    @property
-    def last_synchronized(self):
+    def __init__(self, local_pypi_path, download_mirror="b.pypi.python.org",
+                 user_agent="pypiclone/0.1", synchronize_delete=True):
         """
-        :pep:`381` defines the `changelog` XMLRPC command, which takes a single
-        timestamp, so that it can return only the changed packages.  This will
-        return `None` if it has never been run, or the last_synchronized file
-        is empty, or the timestamp that this mirror was last synchronized.
-
-        Note that reading this without first acquiring the lock may result in
-        this file changing when not expected.  Thus, if modifying the
-        last_synchronized time, make sure to always acquire the lock first.
+        ``local_pypi_path``
+            The path to the local directory where the PyPi mirror will be stored.
+        ``download_mirror``
+            Use this host to download packages.
+        ``user_agent``
+            The user agent to use. :pep:`381` requires that a parsable user agent
+            be defined, that specifies both the application and version.
+        ``synchronize_delete``
+            When True, this will delete local packages that have been deleted from
+            the remote server.
         """
-        try:
-            content = open(self.last_synchronized_filename, "r").read().strip()
-            if not content:
-                # The file was empty!  Assume this is a fresh run.
-                return 0
-        except IOError:
-            # The file didn't exist; thus, this is our first time.
-            return 0
-
-    def update_last_synchronized(self, timestamp):
-        """
-        (Re)sets the timestamp in the local PyPi location.  Be careful when
-        running this; if the run is NOT successful and you update this
-        timestamp, you WILL miss out on packages!
-
-        ``timestamp``
-            Unix timestamp representing the time this was last sync'd.  This
-            should be the time the package listing was retrieved from the
-            server, NOT when this client finished retrieving the packages.
-        """
-        try:
-            fd = open(self.last_synchronized_filename, "w+")
-            fd.write("%d" % timestamp)
-            fd.close()
-        except IOError:
-            raise Exception(
-                "Could not write timestamp `{timestamp}` to `{filename}`! "
-                "Please update this manually, or your mirror may be out of "
-                "date!" % (timestamp, self.last_synchronized_filename))
+        self.synchronize_delete = synchronize_delete
+        self.local_pypi_repo = LocalPypiRepository(local_pypi_path)
+        self.remote_pypi_repo = RemotePypiRepository(
+            download_mirror, user_agent)
 
     def synchronize(self):
+        # Setup the xmlrpclib connection to the main PyPi server.
+        pypi_rpc = xmlrpclib.ServerProxy( "http://pypi.python.org/pypi")
+
+    def synchronize_archives(self, package):
+        log.info("Synhronizing %s package", package)
+        # Retrieve the simple page from the local directory.
+        tree = ElementTree.fromstring(
+            self.local_pypi_repo.load_simple_page(package))
+
+        # Parse each of the anchor tags, looking for a reference to
+        # `../../packages`.  This is required because pep381 currently makes no
+        # assertion that the anchor tags have any specific attributes (i.e.,
+        # "download").
+        for anchor_tag in tree.iter(".//a"):
+            href = anchor_tag.get('href')
+            if not href.startswith("../../packages"):
+                continue
+            
+            # If the local file already exists, skip it
+            local_package_path = self.local_pypi_repo.resource_path(href)
+            if os.path.exists(local_package_path):
+                log.debug("%s already synchronized.", local_package_path)
+                continue
+
+            # Create the directory structure as well (i.e.,
+            # /packages/source/2.6/w/whatever)
+            basedir = os.path.basename(local_package_path)
+            if not os.path.exists(basedir):
+                os.makedirs(basedir)
+
+            # Save the remote archive locally
+            remote_package = self.remote_pypi_repo.load_archive(href)
+            self.local_pypi_repo.write_archive(
+                local_package_path, remote_package)
+
+            log.info("Synchronized %s", local_package_path)
+
+    def synchronize_simple_page(self, package):
         """
-        Synchronizes the current PyPi mirror with this one.  If this is a new
-        mirror, it will start fresh.  This will always acquire the lock.
+        Downloads the page at :path:`/simple/{package}`, which contains a list
+        of the packages.
+
+        ``package``
+            Name of the package to synchronize.
         """
-        http_conn = HTTPConnection(self.mirror_host)
-        request_headers = {"User-Agent": USER_AGENT}
+        remote_simple_page = self.remote_pypi_repo.load_simple_page(package)
+        self.local_pypi_repo.write_simple_page(remote_simple_page)
 
-        def get_path_from_url(url_path):
-            return urlparse.urlsplit(url_path)[2]
-
-        def calculate_local_path(package_name, package_version, package_type,
-                                 package_filename, python_version):
-            return os.path.join(self.local_pypi_destination, "packages",
-                                python_version, package_name[0], package_name,
-                                package_filename)
-
-        def retrieve_package(package_name, package_version):
-            print "Retrieving", package_name, package_version
-            all_package_urls = self._xmlrpc_conn.release_urls(package_name, package_version)
-            for package_env in all_package_urls:
-                package_filename = package_env['filename']
-                python_version = package_env['python_version']
-                package_type = package_env['packagetype']
-                package_path = get_path_from_url(package_env['url'])
-                print package_path
-
-                local_file = calculate_local_path(
-                    package_name, package_version, package_type,
-                    package_filename, python_version)
-                http_conn.request('GET', package_path, headers=request_headers)
-                resp = http_conn.getresponse()
-                try:
-                    os.makedirs(os.path.dirname(local_file))
-                except OSError:
-                    pass
-                shutil.copyfileobj(resp, open(local_file, "w+"))
-
-        print "Preparing to lock..."
-        with self.__lockfile:
-            print "checking updated packages"
-            # Call the updated_releases command to get a list of changed
-            # objects; these are all lists of `[name, version]`.
-            #updated_packages = self._xmlrpc_conn.updated_releases(
-            #    self.last_synchronized)
-            updated_packages = self._xmlrpc_conn.updated_releases(
-                int(time.time()) - 30000)
-            for package in updated_packages:
-                retrieve_package(*package)
-                return
-
-        print "DONE"
-
-        # Lastly, write the last-synchronized file
-        self.update_last_synchronized(time.time())
-
-if __name__ == "__main__":
-    PypiSource("tmp_pypi_src").synchronize()
+    def synchronize_signature(self, package):
+        """
+        Downloads the signature at :path:`/signature/{package}`, which is used
+        to verify the correctness of the downloads.
+        """
+        remote_signature = self.remote_pypi_repo.load_signature(package)
+        self.local_pypi_repo.write_signature(remote_signature)
