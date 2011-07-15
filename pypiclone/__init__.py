@@ -8,21 +8,23 @@ from pypiclone.repository import LocalPypiRepository, RemotePypiRepository
 
 log = logging.getLogger(__name__)
 
+
 class MirrorClient(object):
 
     def __init__(self, local_pypi_path, download_mirror="b.pypi.python.org",
                  user_agent="pypiclone/0.1", synchronize_delete=True):
         """
         ``local_pypi_path``
-            The path to the local directory where the PyPi mirror will be stored.
+            The path to the local directory where the PyPi mirror will be
+            stored.
         ``download_mirror``
             Use this host to download packages.
         ``user_agent``
-            The user agent to use. :pep:`381` requires that a parsable user agent
-            be defined, that specifies both the application and version.
+            The user agent to use. :pep:`381` requires that a parsable user
+            agent be defined, that specifies both the application and version.
         ``synchronize_delete``
-            When True, this will delete local packages that have been deleted from
-            the remote server.
+            When True, this will delete local packages that have been deleted
+            from the remote server.
         """
         self.synchronize_delete = synchronize_delete
         self.local_pypi_repo = LocalPypiRepository(local_pypi_path)
@@ -31,7 +33,7 @@ class MirrorClient(object):
 
     def synchronize(self):
         # Setup the xmlrpclib connection to the main PyPi server.
-        pypi_rpc = xmlrpclib.ServerProxy( "http://pypi.python.org/pypi")
+        pypi_rpc = xmlrpclib.ServerProxy("http://pypi.python.org/pypi")
 
     def synchronize_archives(self, package):
         log.info("Synhronizing %s package", package)
@@ -47,7 +49,7 @@ class MirrorClient(object):
             href = anchor_tag.get('href')
             if not href.startswith("../../packages"):
                 continue
-            
+
             # If the local file already exists, skip it
             local_package_path = self.local_pypi_repo.resource_path(href)
             if os.path.exists(local_package_path):
